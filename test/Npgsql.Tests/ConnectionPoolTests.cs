@@ -23,8 +23,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 using NUnit.Framework;
 
 namespace Npgsql.Tests
@@ -32,102 +35,221 @@ namespace Npgsql.Tests
     class ConnectionPoolTests : TestBase
     {
         [Test]
-        public void MinPoolSize()
+        public void MinPoolSizeEqualsMaxPoolSize()
         {
-            var conn = new NpgsqlConnection(ConnectionString + ";MinPoolSize=30;MaxPoolSize=30");
-            conn.Open();
-            conn.Close();
-
-            conn = new NpgsqlConnection(ConnectionString + ";MaxPoolSize=30;MinPoolSize=30");
-            conn.Open();
-            conn.Close();
+            using (var conn = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(ConnectionString) {
+                MinPoolSize = 30,
+                MaxPoolSize = 30
+            }))
+            {
+                conn.Open();
+            }
         }
 
         [Test]
-        [ExpectedException(typeof(ArgumentException))]
         public void MinPoolSizeLargeThanMaxPoolSize()
         {
-            var conn = new NpgsqlConnection(ConnectionString + ";MinPoolSize=2;MaxPoolSize=1");
-            conn.Open();
-            conn.Close();
+            using (var conn = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(ConnectionString)
+            {
+                MinPoolSize = 2,
+                MaxPoolSize = 1
+            }))
+            {
+                Assert.That(() => conn.Open(), Throws.Exception.TypeOf<ArgumentException>());
+            }
         }
 
         [Test]
-        [ExpectedException(typeof(ArgumentException))]
         public void MinPoolSizeLargeThanPoolSizeLimit()
         {
-            var conn = new NpgsqlConnection(ConnectionString + ";MinPoolSize=1025;");
-            conn.Open();
-            conn.Close();
+            var csb = new NpgsqlConnectionStringBuilder(ConnectionString);
+            Assert.That(() => csb.MinPoolSize = PoolManager.PoolSizeLimit + 1, Throws.Exception.TypeOf<ArgumentOutOfRangeException>());
+        }
+
+        [Test]
+        public void MinPoolSize()
+        {
+            var connString = new NpgsqlConnectionStringBuilder(ConnectionString) { MinPoolSize = 2 };
+            using (var conn = new NpgsqlConnection(connString))
+            {
+                connString = conn.Settings; // Shouldn't be necessary
+                conn.Open();
+                conn.Close();
+            }
+
+            var pool = PoolManager.Pools[connString];
+            Assert.That(pool.Idle, Has.Count.EqualTo(2));
+            /*
+            using (var conn1 = new NpgsqlConnection(connString))
+            using (var conn2 = new NpgsqlConnection(connString))
+            using (var conn3 = new NpgsqlConnection(connString))
+            {
+                conn1.Open(); conn2.Open(); conn3.Open();
+            }
+            Assert.That(pool.Idle, Has.Count.EqualTo(2));*/
+        }
+
+        [Test, Description("Broken connection(s) leaves pool in consistent state")]
+        public void ConnectionsAreDistinct()
+        {
+            var connString = new NpgsqlConnectionStringBuilder(ConnectionString) {MinPoolSize = 3};
+
+            using (var conn1 = new NpgsqlConnection(connString))
+            using (var conn2 = new NpgsqlConnection(connString))
+            {
+                conn1.Open();
+                conn2.Open();
+                Assert.That(conn1.Connector, Is.Not.SameAs(conn2.Connector));
+                Assert.That(conn1, Is.SameAs(conn1.Connector.Connection));
+                Assert.That(conn2, Is.SameAs(conn2.Connector.Connection));
+            }
+        }
+
+        [Test, Description("Broken connection(s) leaves pool in consistent state")]
+        public void MinPoolSizeIsRespectedAfterBrokenConnections()
+        {
+            var connString = new NpgsqlConnectionStringBuilder(ConnectionString) { MinPoolSize = 3 };
+
+            using (var conn1 = new NpgsqlConnection(connString))
+            using (var conn2 = new NpgsqlConnection(connString))
+            using (var conn3 = new NpgsqlConnection(connString))
+            {
+                conn1.Open(); conn2.Open(); conn3.Open();
+
+                var pool = PoolManager.Pools[conn1.Settings];
+                Assert.That(pool.Busy, Is.EqualTo(3));
+                ExecuteNonQuery($"SELECT pg_terminate_backend({conn1.ProcessID})");
+                ExecuteNonQuery($"SELECT pg_terminate_backend({conn2.ProcessID})");
+
+                Assert.That(() => ExecuteScalar("select 1", conn1), Throws.Exception.TypeOf<IOException>());
+                Assert.That(() => ExecuteScalar("select 1", conn2), Throws.Exception.TypeOf<IOException>());
+
+                Assert.That(pool.Busy, Is.EqualTo(1));
+                Assert.That(pool.Idle, Has.Count.EqualTo(0));
+
+                conn1.Open();
+
+                Assert.That(pool.Busy, Is.EqualTo(2));
+                Assert.That(pool.Idle, Has.Count.EqualTo(1));
+            }
+        }
+
+
+        [Test]
+        public void ReuseConnectorBeforeCreatingNew()
+        {
+            using (var conn = new NpgsqlConnection(ConnectionString))
+            {
+                conn.Open();
+                var backendId = conn.Connector.BackendProcessId;
+                conn.Close();
+                conn.Open();
+                Assert.That(conn.Connector.BackendProcessId, Is.EqualTo(backendId));
+            }
+        }
+
+        [Test]
+        public void GetConnectorFromExhaustedPool()
+        {
+            var connString = new NpgsqlConnectionStringBuilder(ConnectionString) {
+                MaxPoolSize = 1,
+                Timeout = 0
+            };
+
+            using (var conn1 = new NpgsqlConnection(connString))
+            {
+                conn1.Open();
+                var backendId = conn1.Connector.BackendProcessId;
+                // Pool is exhausted
+                using (var conn2 = new NpgsqlConnection(connString))
+                {
+                    new Timer(o => conn1.Close(), null, 1000, Timeout.Infinite);
+                    conn2.Open();
+                    Assert.That(conn2.Connector.BackendProcessId, Is.EqualTo(backendId));
+                }
+            }
+        }
+
+        [Test]
+        public void TimeoutGettingConnectorFromExhaustedPool()
+        {
+            var connString = new NpgsqlConnectionStringBuilder(ConnectionString) {
+                MaxPoolSize = 1,
+                Timeout = 1
+            };
+
+            int backendId;
+            using (var conn1 = new NpgsqlConnection(connString))
+            {
+                conn1.Open();
+                backendId = conn1.Connector.BackendProcessId;
+                // Pool is exhausted
+                using (var conn2 = new NpgsqlConnection(connString))
+                {
+                    Assert.That(() => conn2.Open(), Throws.Exception.TypeOf<TimeoutException>());
+                }
+            }
+            // conn1 should now be back in the pool as idle
+            using (var conn3 = new NpgsqlConnection(connString))
+            {
+                conn3.Open();
+                Assert.That(conn3.Connector.BackendProcessId, Is.EqualTo(backendId));
+            }
         }
 
         [Test, Description("Makes sure that when a pooled connection is closed it's properly reset, and that parameter settings aren't leaked")]
         public void ResetOnClose()
         {
-            var conn = new NpgsqlConnection(ConnectionString + ";SearchPath=public");
-            conn.Open();
-            ExecuteNonQuery("DROP SCHEMA IF EXISTS foo CASCADE");
-            ExecuteNonQuery("CREATE SCHEMA foo");
-            try
+            using (var conn = new NpgsqlConnection(ConnectionString + ";SearchPath=public"))
             {
-                ExecuteNonQuery("SET search_path=foo", conn);
-                conn.Close();
                 conn.Open();
-                Assert.That(ExecuteScalar("SHOW search_path", conn), Is.EqualTo("public"));
+                Assert.That(ExecuteScalar("SHOW search_path", conn), Is.Not.StringContaining("pg_temp"));
+                var backendId = conn.Connector.BackendProcessId;
+                ExecuteNonQuery("SET search_path=pg_temp", conn);
                 conn.Close();
+
+                conn.Open();
+                Assert.That(conn.Connector.BackendProcessId, Is.EqualTo(backendId));
+                Assert.That(ExecuteScalar("SHOW search_path", conn), Is.EqualTo("public"));
             }
-            finally
+        }
+
+        [Test, Description("Connection failure leaves pool in consistent state")]
+        public void ConnectionFailure()
+        {
+            var csb = new NpgsqlConnectionStringBuilder(ConnectionString) { Port = 44444 };
+
+            using (var conn = new NpgsqlConnection(csb))
             {
-                ExecuteNonQuery("DROP SCHEMA foo");
+                Assert.That(() => conn.Open(), Throws.Exception.TypeOf<SocketException>());
+
+                var pool = PoolManager.Pools[conn.Settings];
+                Assert.That(pool.Busy, Is.EqualTo(0));
+                Assert.That(pool.Idle, Has.Count.EqualTo(0));
             }
         }
 
-        [Test]
-        public void UseAllConnectionsInPool()
+        [Test, Description("Broken connection(s) leaves pool in consistent state")]
+        public void BrokenConnectionGetsCleanedUp()
         {
-            // As this method uses a lot of connections, clear all connections from all pools before starting.
-            // This is needed in order to not reach the max connections allowed and start to raise errors.
+            using (var conn = new NpgsqlConnection(ConnectionString))
+            {
+                conn.Open();
+                var pool = PoolManager.Pools[conn.Settings];
+                Assert.That(pool.Busy, Is.EqualTo(2));
+                // Use another connection to kill our connector
+                var connectorId = conn.ProcessID;
+                ExecuteNonQuery($"SELECT pg_terminate_backend({connectorId})");
 
-            NpgsqlConnection.ClearAllPools();
-            try {
-                var openedConnections = new List<NpgsqlConnection>();
-                // repeat test to exersize pool
-                for (var i = 0; i < 10; ++i) {
-                    try {
-                        // 18 since base class opens two and the default pool size is 20
-                        for (var j = 0; j < 18; ++j) {
-                            var connection = new NpgsqlConnection(ConnectionString);
-                            connection.Open();
-                            openedConnections.Add(connection);
-                        }
-                    } finally {
-                        openedConnections.ForEach(delegate(NpgsqlConnection con) { con.Dispose(); });
-                        openedConnections.Clear();
-                    }
-                }
-            } finally {
-                NpgsqlConnection.ClearAllPools();
-            }
-        }
+                // Make sure that npgsql "understands" the connection is broken
+                Assert.That(() => ExecuteScalar("select 1", conn), Throws.Exception.TypeOf<IOException>());
 
-        [Test]
-        [ExpectedException]
-        public void ExceedConnectionsInPool()
-        {
-            var openedConnections = new List<NpgsqlConnection>();
-            try {
-                // exceed default pool size of 20
-                for (var i = 0; i < 21; ++i) {
-                    var connection = new NpgsqlConnection(ConnectionString + ";Timeout=1");
-                    connection.Open();
-                    openedConnections.Add(connection);
-                }
-            } finally {
-                openedConnections.ForEach(delegate(NpgsqlConnection con) { con.Dispose(); });
-                NpgsqlConnection.ClearAllPools();
+                Assert.That(pool.Busy, Is.EqualTo(1));
+                Assert.That(pool.Idle, Has.Count.EqualTo(0));
             }
         }
 
         public ConnectionPoolTests(string backendVersion) : base(backendVersion) {}
     }
 }
+

@@ -83,7 +83,7 @@ namespace Npgsql
         /// <summary>
         /// Contains the clear text password which was extracted from the user-provided connection string.
         /// </summary>
-        internal string Password { get; private set; }
+        string _password;
 
         /// <summary>
         /// The connector object connected to the backend.
@@ -241,9 +241,9 @@ namespace Npgsql
             // Copy the password aside and remove it from the user-provided connection string
             // (unless PersistSecurityInfo has been requested). Note that cloned connections already
             // have Password populated and should not be overwritten.
-            if (Password == null)
+            if (_password == null)
             {
-                Password = Settings.Password;
+                _password = Settings.Password;
             }
             if (!Settings.PersistSecurityInfo)
             {
@@ -255,17 +255,16 @@ namespace Npgsql
 
             try
             {
-                // Get a Connector, either from the pool or creating one ourselves.
                 if (Settings.Pooling)
                 {
-                    Connector = NpgsqlConnectorPool.ConnectorPoolMgr.RequestConnector(this);
+                    Connector = PoolManager.GetOrAdd(Settings).Allocate(this, _password, timeout);
                 }
                 else
                 {
-                    Connector = new NpgsqlConnector(this);
+                    Connector = new NpgsqlConnector(this, _password);
                     Connector.Open(timeout);
                 }
-
+                Connector.Connection = this;
                 Connector.Notice += _noticeDelegate;
                 Connector.Notification += _notificationDelegate;
 
@@ -635,7 +634,7 @@ namespace Npgsql
 
             if (Settings.Pooling)
             {
-                NpgsqlConnectorPool.ConnectorPoolMgr.ReleaseConnector(this, Connector);
+                PoolManager.Get(Settings).Release(Connector);
             }
             else
             {
@@ -1340,7 +1339,7 @@ namespace Npgsql
         {
             CheckNotDisposed();
             return new NpgsqlConnection(ConnectionString) {
-                Password = Password,
+                _password = _password,
                 ProvideClientCertificatesCallback = ProvideClientCertificatesCallback,
                 UserCertificateValidationCallback = UserCertificateValidationCallback
             };
@@ -1357,9 +1356,9 @@ namespace Npgsql
         {
             CheckNotDisposed();
             var csb = new NpgsqlConnectionStringBuilder(connectionString);
-            if (csb.Password == null && Password != null)
+            if (csb.Password == null && _password != null)
             {
-                csb.Password = Password;
+                csb.Password = _password;
             }
             return new NpgsqlConnection(csb) {
                 ProvideClientCertificatesCallback = ProvideClientCertificatesCallback,
@@ -1404,7 +1403,8 @@ namespace Npgsql
         /// </summary>
         public static void ClearPool(NpgsqlConnection connection)
         {
-            NpgsqlConnectorPool.ConnectorPoolMgr.ClearPool(connection);
+            throw new NotImplementedException();
+            //NpgsqlConnectorPool.ConnectorPoolMgr.ClearPool(connection);
         }
 
         /// <summary>
@@ -1412,7 +1412,8 @@ namespace Npgsql
         /// </summary>
         public static void ClearAllPools()
         {
-            NpgsqlConnectorPool.ConnectorPoolMgr.ClearAllPools();
+            throw new NotImplementedException();
+            //NpgsqlConnectorPool.ConnectorPoolMgr.ClearAllPools();
         }
 
         /// <summary>

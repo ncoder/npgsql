@@ -1,3 +1,4 @@
+#if OLD
 #region License
 // The PostgreSQL License
 //
@@ -164,8 +165,7 @@ namespace Npgsql
         internal NpgsqlConnector RequestConnector(NpgsqlConnection connection)
         {
             if (connection.MaxPoolSize < connection.MinPoolSize)
-                throw new ArgumentException(
-                    $"Connection can't have MaxPoolSize {connection.MaxPoolSize} under MinPoolSize {connection.MinPoolSize}");
+                throw new ArgumentException(string.Format("Connection can't have MaxPoolSize {0} under MinPoolSize {1}", connection.MaxPoolSize, connection.MinPoolSize));
             Contract.Ensures(Contract.Result<NpgsqlConnector>().State == ConnectorState.Ready, "Pool returned a connector with state ");
 
             NpgsqlConnector connector;
@@ -441,10 +441,11 @@ namespace Npgsql
         static NpgsqlConnectorPool()
         {
             ConnectorPoolMgr = new NpgsqlConnectorPool();
-#if NET45 || NET452 || DNX452
+#if !DNXCORE50
             AppDomain.CurrentDomain.DomainUnload += (sender, args) => { Thread.Sleep(3); ConnectorPoolMgr.ClearAllPools(); };
             AppDomain.CurrentDomain.ProcessExit += (sender, args) => { Thread.Sleep(3); ConnectorPoolMgr.ClearAllPools(); };
 #endif
         }
     }
 }
+#endif

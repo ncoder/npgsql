@@ -75,6 +75,23 @@ namespace Npgsql
         readonly string _password;
 
         /// <summary>
+        /// Selects the local Secure Sockets Layer (SSL) certificate used for authentication.
+        /// </summary>
+        /// <remarks>
+        /// See <see href="https://msdn.microsoft.com/en-us/library/system.net.security.localcertificateselectioncallback(v=vs.110).aspx"/>
+        /// </remarks>
+        ProvideClientCertificatesCallback _provideClientCertificatesCallback;
+
+        /// <summary>
+        /// Verifies the remote Secure Sockets Layer (SSL) certificate used for authentication.
+        /// Ignored if <see cref="NpgsqlConnectionStringBuilder.TrustServerCertificate"/> is set.
+        /// </summary>
+        /// <remarks>
+        /// See <see href="https://msdn.microsoft.com/en-us/library/system.net.security.remotecertificatevalidationcallback(v=vs.110).aspx"/>
+        /// </remarks>
+        RemoteCertificateValidationCallback _userCertificateValidationCallback;
+
+        /// <summary>
         /// Buffer used for reading data.
         /// </summary>
         internal NpgsqlBuffer Buffer { get; private set; }
@@ -252,24 +269,19 @@ namespace Npgsql
 
         #region Constructors
 
-        internal NpgsqlConnector(NpgsqlConnection connection)
-            : this(connection.Settings, connection.Password)
-        {
-            Connection = connection;
-            Connection.Connector = this;
-        }
-
         /// <summary>
         /// Creates a new connector with the given connection string.
         /// </summary>
-        /// <param name="connectionString">The connection string.</param>
-        /// <param name="password">The clear-text password or null if not using a password.</param>
-        NpgsqlConnector(NpgsqlConnectionStringBuilder connectionString, string password)
+        internal NpgsqlConnector(NpgsqlConnection conn, string password)
         {
             State = ConnectorState.Closed;
             TransactionStatus = TransactionStatus.Idle;
-            _settings = connectionString;
+            Connection = conn;
+            Connection.Connector = this;
+            _settings = conn.Settings;
             _password = password;
+            _provideClientCertificatesCallback = conn.ProvideClientCertificatesCallback;
+            _userCertificateValidationCallback = conn.UserCertificateValidationCallback;
             BackendParams = new Dictionary<string, string>();
             _messagesToSend = new List<FrontendMessage>();
             _preparedStatementIndex = 0;
@@ -489,16 +501,16 @@ namespace Npgsql
                         break;
                     case 'S':
                         var clientCertificates = new X509CertificateCollection();
-                        Connection.ProvideClientCertificatesCallback?.Invoke(clientCertificates);
+                        _provideClientCertificatesCallback?.Invoke(clientCertificates);
 
                         RemoteCertificateValidationCallback certificateValidationCallback;
                         if (_settings.TrustServerCertificate)
                         {
                             certificateValidationCallback = (sender, certificate, chain, errors) => true;
                         }
-                        else if (Connection.UserCertificateValidationCallback != null)
+                        else if (_userCertificateValidationCallback != null)
                         {
-                            certificateValidationCallback = Connection.UserCertificateValidationCallback;
+                            certificateValidationCallback = _userCertificateValidationCallback;
                         }
                         else
                         {
@@ -1436,7 +1448,7 @@ namespace Npgsql
         {
             lock (_cancelLock)
             {
-                var cancelConnector = new NpgsqlConnector(_settings, _password);
+                var cancelConnector = new NpgsqlConnector(Connection, _password);
                 cancelConnector.DoCancelRequest(BackendProcessId, _backendSecretKey, cancelConnector.ConnectionTimeout);
             }
         }
