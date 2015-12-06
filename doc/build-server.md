@@ -9,9 +9,9 @@ If you're upgrading the TeamCity version, see "Give agent service start/stop per
 
 ## Install all supported versions of the Postgresql backend
 
-At the time of writing, this means 8.4, 9.0, 9.1, 9.2, 9.3. They are configured on ports 5484, 5490, 5491, 5492, 5493.
+At the time of writing, this means 9.0, 9.1, 9.2, 9.3, 9.4, 9.5 (beta). They are configured on ports 5490, 5491, 5492, 5493, 5494, 5495.
 
-The parameterized unit tests look at the environment variables NPGSQL_TEST_DB_8.4, NPGSQL_TEST_DB_9.0 and so on for the connection strings to the above. Set them up in TeamCity on the Npgsql project level, in the parameters tab.
+The parameterized unit tests look at the environment variables NPGSQL_TEST_DB_9.0, NPGSQL_TEST_DB_9.1 and so on for the connection strings to the above. Set them up in TeamCity on the Npgsql project level, in the parameters tab.
 
 ## Install a TeamCity-dedicated Postgresql cluster
 
